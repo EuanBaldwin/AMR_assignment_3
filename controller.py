@@ -2,90 +2,92 @@
 
 import math
 
-# Simple local-yaw PID controller. Position error in global frame
-# is rotated into local yaw frame for X/Y. Z is handled directly in world frame.
+# Local-yaw PID controller.
+# Global position errors are rotated into the drone's local frame for X/Y control,
+# while Z is controlled directly in the world frame.
 
-# Store integrals and previous errors to implement PID over time
-pid_data = {
-    'xy': {'int_x': 0.0, 'int_y': 0.0, 'prev_x': 0.0, 'prev_y': 0.0},
-    'z':  {'int_z': 0.0, 'prev_z': 0.0},
-    'yaw': {'int_yaw': 0.0, 'prev_yaw': 0.0}
+# Store integrals and previous errors for the PID controller
+pid_state = {
+    'xy': {'integral_x': 0.0, 'integral_y': 0.0, 'prev_error_x': 0.0, 'prev_error_y': 0.0},
+    'z':  {'integral_z': 0.0, 'prev_error_z': 0.0},
+    'yaw': {'integral_yaw': 0.0, 'prev_error_yaw': 0.0}
 }
 
 # PID gains - K_u is measured to be 1.2 and T_u to be 2.4s
-Kp_xy, Ki_xy, Kd_xy = 0.5, 0.02, 0.05
-Kp_z,  Ki_z,  Kd_z  = 0.5, 0.02, 0.05
-Kp_yaw, Ki_yaw, Kd_yaw = 0.5, 0.02, 0.05
+kp_xy, ki_xy, kd_xy = 0.5, 0.2, 0.05
+kp_z,  ki_z,  kd_z  = 0.5, 0.2, 0.05
+kp_yaw, ki_yaw, kd_yaw = 0.5, 0.2, 0.05
 
 # Command limits to prevent extreme velocity or yaw rate
 MAX_VEL_XY   = 2.0
 MAX_VEL_Z    = 1.4
 MAX_YAW_RATE = 3.0
 
-def clamp(val, mn, mx):
-    return max(mn, min(val, mx))
+def clamp(value, minimum, maximum):
+    return max(minimum, min(value, maximum))
 
-def angle_difference(tgt, cur):
+def angle_difference(target, current):
     # Signed difference, ensuring result is in (-pi, pi)
-    diff = (tgt - cur + math.pi) % (2 * math.pi) - math.pi
+    diff = (target - current + math.pi) % (2 * math.pi) - math.pi
     return diff
 
-def controller(state, target_pos, dt):
+def controller(state, target, dt):
     """
     Single-layer PID controller that outputs local velocity commands.
     
     state: [x, y, z, roll, pitch, yaw]
-    target_pos: (tx, ty, tz, tyaw)
+    target: (target_x, target_y, target_z, target_yaw)
     dt: time step (seconds)
-    Returns: (vx_local, vy_local, vz_local, yaw_rate)
+    
+    Returns: (velocity_x_local, velocity_y_local, velocity_z, yaw_rate)
     """
     if dt <= 0:
         return (0.0, 0.0, 0.0, 0.0)
 
-    # Current position/orientation
+    # Current position and orientation
     x, y, z, _, _, yaw = state
-    # Desired position/orientation
-    tx, ty, tz, tyaw = target_pos
+    # Desired position and orientation
+    target_x, target_y, target_z, target_yaw = target
 
     # --- Position errors in world frame ---
-    exw = tx - x
-    eyw = ty - y
-    ezw = tz - z
+    error_world_x = target_x - x
+    error_world_y = target_y - y
+    error_world_z = target_z - z
 
-    # --- Rotate X/Y errors into drone's local-yaw frame ---
-    cos_neg_yaw = math.cos(-yaw)
-    sin_neg_yaw = math.sin(-yaw)
-    exl = exw * cos_neg_yaw - eyw * sin_neg_yaw
-    eyl = exw * sin_neg_yaw + eyw * cos_neg_yaw
+    # --- Rotate X/Y errors into the drone's local frame ---
+    cos_yaw = math.cos(-yaw)
+    sin_yaw = math.sin(-yaw)
+    error_local_x = error_world_x * cos_yaw - error_world_y * sin_yaw
+    error_local_y = error_world_x * sin_yaw + error_world_y * cos_yaw
 
     # --- X/Y local PID ---
-    pid_data['xy']['int_x'] += exl * dt
-    pid_data['xy']['int_y'] += eyl * dt
-    dx = (exl - pid_data['xy']['prev_x']) / dt
-    dy = (eyl - pid_data['xy']['prev_y']) / dt
-    pid_data['xy']['prev_x'] = exl
-    pid_data['xy']['prev_y'] = eyl
+    pid_state['xy']['integral_x'] += error_local_x * dt
+    pid_state['xy']['integral_y'] += error_local_y * dt
+    derivative_x = (error_local_x - pid_state['xy']['prev_error_x']) / dt
+    derivative_y = (error_local_y - pid_state['xy']['prev_error_y']) / dt
+    pid_state['xy']['prev_error_x'] = error_local_x
+    pid_state['xy']['prev_error_y'] = error_local_y
 
-    vx = Kp_xy * exl + Ki_xy * pid_data['xy']['int_x'] + Kd_xy * dx
-    vy = Kp_xy * eyl + Ki_xy * pid_data['xy']['int_y'] + Kd_xy * dy
+    vel_x = kp_xy * error_local_x + ki_xy * pid_state['xy']['integral_x'] + kd_xy * derivative_x
+    vel_y = kp_xy * error_local_y + ki_xy * pid_state['xy']['integral_y'] + kd_xy * derivative_y
 
-    # --- Z PID (stay in world frame) ---
-    pid_data['z']['int_z'] += ezw * dt
-    dz = (ezw - pid_data['z']['prev_z']) / dt
-    pid_data['z']['prev_z'] = ezw
-    vz = Kp_z * ezw + Ki_z * pid_data['z']['int_z'] + Kd_z * dz
+    # --- Z PID (world frame) ---
+    pid_state['z']['integral_z'] += error_world_z * dt
+    derivative_z = (error_world_z - pid_state['z']['prev_error_z']) / dt
+    pid_state['z']['prev_error_z'] = error_world_z
+    vel_z = kp_z * error_world_z + ki_z * pid_state['z']['integral_z'] + kd_z * derivative_z
 
     # --- Yaw PID (angle -> yaw rate) ---
-    eyaw = angle_difference(tyaw, yaw)
-    pid_data['yaw']['int_yaw'] += eyaw * dt
-    dyaw = (eyaw - pid_data['yaw']['prev_yaw']) / dt
-    pid_data['yaw']['prev_yaw'] = eyaw
-    vyaw = Kp_yaw * eyaw + Ki_yaw * pid_data['yaw']['int_yaw'] + Kd_yaw * dyaw
+    error_yaw = angle_difference(target_yaw, yaw)
+    pid_state['yaw']['integral_yaw'] += error_yaw * dt
+    derivative_yaw = (error_yaw - pid_state['yaw']['prev_error_yaw']) / dt
+    pid_state['yaw']['prev_error_yaw'] = error_yaw
+    yaw_rate = kp_yaw * error_yaw + ki_yaw * pid_state['yaw']['integral_yaw'] + kd_yaw * derivative_yaw
 
     # --- Clamp velocity and yaw rate ---
-    vx   = clamp(vx,   -MAX_VEL_XY,   MAX_VEL_XY)
-    vy   = clamp(vy,   -MAX_VEL_XY,   MAX_VEL_XY)
-    vz   = clamp(vz,   -MAX_VEL_Z,    MAX_VEL_Z)
-    vyaw = clamp(vyaw, -MAX_YAW_RATE, MAX_YAW_RATE)
+    vel_x   = clamp(vel_x,   -MAX_VEL_XY,   MAX_VEL_XY)
+    vel_y   = clamp(vel_y,   -MAX_VEL_XY,   MAX_VEL_XY)
+    vel_z   = clamp(vel_z,   -MAX_VEL_Z,    MAX_VEL_Z)
+    yaw_rate = clamp(yaw_rate, -MAX_YAW_RATE, MAX_YAW_RATE)
 
-    return (vx, vy, vz, vyaw)
+    return (vel_x, vel_y, vel_z, yaw_rate)
